@@ -54,7 +54,8 @@ def compute_response_logprobs(model, tokenizer, prompts, responses, max_length):
 
     # Model, and raw logits:
     output = model(input_ids = input_ids, attention_mask = attention_mask)
-    logits = output.logits
+    # Upcast so an fp16 model (e.g. the frozen DPO reference) gets an fp32 log-softmax:
+    logits = output.logits.float()
 
     # Log Softmax, with slicing:
     log_probs = torch.log_softmax(logits, dim = -1)
