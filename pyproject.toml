@@ -11,3 +11,4 @@ dependencies = []
 
 [tool.setuptools]
 packages = ["pa2"]
+py-modules = ["submission_adapter"]
