@@ -15,24 +15,29 @@ def build_sft_batch(tokenizer, prompts, responses, max_length):
     attention_mask = []
     labels = []
 
-    for prompt, response in zip(prompts, responses):
-        # input_ids:
-        p = tokenizer.encode(text = prompt, add_special_tokens=False)
-        r = tokenizer.encode(text = response, add_special_tokens=False)
+    # EOS is appended only when the tokenizer has one; pad falls back to EOS, then 0
+    # (padding positions are masked out, so any valid id works).
+    eos = [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
 
-        if(len(p) + len(r) + 1 < max_length):
-            input_ids.append(p + r + [tokenizer.eos_token_id] + (max_length - 1 - len(r) - len(p)) * [tokenizer.pad_token_id])
-        else:
-            n = p + r + [tokenizer.eos_token_id]
-            input_ids.append(n[:max_length])
+    for prompt, response in zip(prompts, responses):
+        p = tokenizer.encode(text = prompt, add_special_tokens=False)
+        r = tokenizer.encode(text = response, add_special_tokens=False) + eos
+
+        # Truncate after appending EOS, then right-pad:
+        ids = (p + r)[:max_length]
+        n_pad = max_length - len(ids)
+
+        input_ids.append(ids + [pad_id] * n_pad)
 
         # attention_mask:
-        current_mask = [1] * (len(p) + len(r) + 1) + [0] * (max_length - 1 - len(r) - len(p))
-        attention_mask.append(current_mask[:max_length])
+        attention_mask.append([1] * len(ids) + [0] * n_pad)
 
-        # labels:
-        current_label = [-100] * len(p) + (p + r + [tokenizer.eos_token_id])[len(p):len(r) + len(p) + 1] + [-100] * (max_length - 1 - len(r) - len(p))
-        labels.append(current_label[:max_length])
+        # labels (prompt and padding masked):
+        current_label = ([-100] * len(p) + r)[:max_length]
+        labels.append(current_label + [-100] * n_pad)
 
     return {"input_ids": torch.tensor(input_ids, dtype = torch.long), "attention_mask": torch.tensor(attention_mask, dtype = torch.long), 
             "labels": torch.tensor(labels, dtype = torch.long)}
@@ -41,9 +46,11 @@ def compute_response_logprobs(model, tokenizer, prompts, responses, max_length):
     """Return one summed response-token log-probability per input row."""
     batch = build_sft_batch(tokenizer, prompts, responses, max_length)
 
-    input_ids = batch["input_ids"]
-    attention_mask = batch["attention_mask"]
-    labels = batch["labels"]
+    # Move the batch to wherever the model lives (e.g. cuda:0 policy, cuda:1 reference):
+    device = next(model.parameters()).device
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    labels = batch["labels"].to(device)
 
     # Model, and raw logits:
     output = model(input_ids = input_ids, attention_mask = attention_mask)
@@ -71,8 +78,11 @@ def compute_sft_loss(model, tokenizer, prompts, responses, max_length):
     """Return a scalar response-only SFT loss using either documented reduction."""
     log_prob = compute_response_logprobs(model = model, tokenizer = tokenizer, prompts = prompts, responses = responses, max_length = max_length)
 
+    # Token-level mean: total response NLL / number of scored response tokens.
+    # Shifted labels match the positions summed in compute_response_logprobs.
+    labels = build_sft_batch(tokenizer, prompts, responses, max_length)["labels"]
     sum_log_probs = torch.sum(log_prob)
-    count_log_probs = torch.numel(log_prob) 
+    count_log_probs = max(int((labels[:, 1:] != -100).sum()), 1)
 
     return (-1 *sum_log_probs) / count_log_probs
 
