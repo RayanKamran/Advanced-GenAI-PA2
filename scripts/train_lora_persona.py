@@ -13,8 +13,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 from pathlib import Path
+
+# One GPU is plenty for a 360M model + LoRA. With two visible GPUs the HF Trainer
+# wraps the model in DataParallel, which breaks with PEFT (device mismatch).
+# Must be set before torch initialises CUDA.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
 import torch
 from datasets import Dataset
@@ -116,6 +122,7 @@ def main():
         max_prompt_length=args.max_prompt_length,
         fp16=cuda,
         bf16=False,  # T4 has no bf16; TRL 0.24 defaults it on
+        gradient_checkpointing=False,  # not needed at this size; TRL 0.24 defaults it on
         logging_steps=5,
         eval_strategy="epoch",
         save_strategy="no",
